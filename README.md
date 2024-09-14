@@ -8,7 +8,6 @@
 3.Iniciar transcripción
 
 4.Espera..
-
 5.Click en Guardar transcripción. (Notas,Word,PDF)
 ----
 Nota 1;La versión CodeA tiene corregido el error del botón detener transcripción. (No traduce).
