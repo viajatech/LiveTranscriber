@@ -13,8 +13,6 @@
 
 
 ----
-
 Nota 1;La versión CodeA tiene corregido el error del botón detener transcripción. (No traduce).
-----
-
 Nota 2;La versión CodeTEST puede traducir en otros idiomas pero tiene un error en el botón de detener transcripción.
+----
