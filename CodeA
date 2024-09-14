@@ -1,0 +1,235 @@
+#pip install tkinter
+#pip install openai-whisper
+#pip install torch
+#pip install googletrans==4.0.0-rc1
+#pip install python-docx
+#pip install fpdf
+#pip install pyaudio
+#pip install numpy
+
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import threading
+import whisper
+import pyaudio
+import numpy as np
+from googletrans import Translator, LANGUAGES
+from docx import Document
+from fpdf import FPDF
+
+class TranscriberApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Transcriptor by Viaja Tech")
+        self.is_listening = False
+        self.transcribed_text = ""
+        self.selected_language = 'es'
+        self.translation_languages = self.get_languages()
+        self.model = whisper.load_model("base")
+        self.audio_interface = pyaudio.PyAudio()
+        self.create_widgets()
+        self.stream = None
+        self.transcribe_thread = None
+
+    def create_widgets(self):
+        # Caja de texto para mostrar la transcripción
+        self.text_display = tk.Text(self.root, height=20, width=80)
+        self.text_display.grid(column=0, row=0, columnspan=4, padx=10, pady=10)
+
+        # Seleccionar micrófono
+        ttk.Label(self.root, text="Selecciona el micrófono:").grid(column=0, row=1, padx=10, pady=10, sticky='W')
+        self.microphone_combo = ttk.Combobox(self.root, state='readonly', width=60)
+        self.microphone_combo.grid(column=1, row=1, padx=10, pady=10, columnspan=3)
+        self.load_microphones()
+
+        # Botón para iniciar/detener la transcripción
+        self.toggle_button = ttk.Button(self.root, text="Iniciar Transcripción", command=self.toggle_listening)
+        self.toggle_button.grid(column=0, row=2, padx=10, pady=10)
+
+        # Menú desplegable para seleccionar el idioma de traducción
+        ttk.Label(self.root, text="Idioma de Traducción:").grid(column=1, row=2, padx=10, pady=10)
+        self.language_combo = ttk.Combobox(
+            self.root,
+            values=list(self.translation_languages.values()),
+            state='readonly'
+        )
+        self.language_combo.grid(column=2, row=2, padx=10, pady=10)
+        self.language_combo.set('Español')  # Idioma por defecto
+
+        # Botón para guardar la transcripción
+        self.save_button = ttk.Button(self.root, text="Guardar Transcripción", command=self.save_transcription)
+        self.save_button.grid(column=3, row=2, padx=10, pady=10)
+
+    def load_microphones(self):
+        # Listar los micrófonos disponibles
+        mic_list = []
+        for i in range(self.audio_interface.get_device_count()):
+            device_info = self.audio_interface.get_device_info_by_index(i)
+            if device_info['maxInputChannels'] > 0:
+                mic_list.append(f"{i}: {device_info['name']}")
+        self.microphone_combo['values'] = mic_list
+        if mic_list:
+            self.microphone_combo.current(0)
+        else:
+            messagebox.showerror("Error", "No se encontraron micrófonos.")
+
+    def get_languages(self):
+        # Obtener los idiomas soportados por googletrans
+        languages = {code: name.capitalize() for code, name in LANGUAGES.items()}
+        return languages
+
+    def toggle_listening(self):
+        if not self.is_listening:
+            # Verificar si se ha seleccionado un micrófono
+            if not self.microphone_combo.get():
+                messagebox.showerror("Error", "Por favor, selecciona un micrófono.")
+                return
+            # Obtener el índice del micrófono seleccionado
+            mic_selection = self.microphone_combo.get()
+            mic_index = int(mic_selection.split(":")[0])
+            self.mic_index = mic_index
+            self.is_listening = True
+            self.toggle_button.config(text="Detener Transcripción")
+            self.transcribe_thread = threading.Thread(target=self.listen_and_transcribe, daemon=True)
+            self.transcribe_thread.start()
+        else:
+            # Detener la transcripción
+            self.is_listening = False
+            self.toggle_button.config(text="Iniciar Transcripción")
+            # El hilo se cerrará solo; no llamamos a join() aquí
+
+    def listen_and_transcribe(self):
+        try:
+            chunk = 1024
+            format = pyaudio.paInt16
+            channels = 1
+            rate = 16000  # Whisper requiere 16000 Hz
+
+            # Iniciar el stream de audio
+            self.stream = self.audio_interface.open(
+                format=format,
+                channels=channels,
+                rate=rate,
+                input=True,
+                frames_per_buffer=chunk,
+                input_device_index=self.mic_index
+            )
+
+            print("Iniciando captura de audio...")
+            frames = []
+
+            while self.is_listening:
+                try:
+                    data = self.stream.read(chunk, exception_on_overflow=False)
+                    frames.append(data)
+
+                    # Si se acumulan suficientes datos, procesar
+                    if len(frames) >= int(rate / chunk * 5):  # Procesar cada 5 segundos
+                        frames_copy = frames.copy()
+                        threading.Thread(target=self.process_audio, args=(frames_copy, rate), daemon=True).start()
+                        frames = []
+
+                except Exception as e:
+                    print(f"Error en la captura de audio: {e}")
+                    break
+
+            # Finalizar el stream de audio
+            if self.stream is not None:
+                self.stream.stop_stream()
+                self.stream.close()
+                self.stream = None
+            print("Transcripción detenida.")
+
+        except Exception as e:
+            print(f"Error en el hilo de transcripción: {e}")
+
+    def process_audio(self, frames, rate):
+        try:
+            # Convertir los frames a un array numpy
+            audio_data = b''.join(frames)
+            audio_np = np.frombuffer(audio_data, np.int16).flatten().astype(np.float32) / 32768.0
+
+            # Transcribir el audio con Whisper
+            result = self.model.transcribe(audio_np, language='es', fp16=False)
+            text = result['text']
+
+            # Traducir si es necesario
+            selected_language = self.get_selected_language_code()
+            if selected_language != 'es':
+                translation = self.translator.translate(text, dest=selected_language)
+                text = translation.text
+
+            # Actualizar el texto transcrito
+            self.transcribed_text += text + ' '
+            # Actualizar la caja de texto en el hilo principal
+            self.text_display.after(0, self.update_text_display, text)
+        except Exception as e:
+            print(f"Error en el procesamiento de audio: {e}")
+
+    def update_text_display(self, text):
+        self.text_display.insert(tk.END, text + ' ')
+        self.text_display.see(tk.END)
+
+    def get_selected_language_code(self):
+        selected_language_name = self.language_combo.get()
+        for code, name in self.translation_languages.items():
+            if name == selected_language_name:
+                return code
+        return 'es'
+
+    def save_transcription(self):
+        if not self.transcribed_text.strip():
+            messagebox.showerror("Error", "No hay transcripción para guardar.")
+            return
+        # Diálogo para seleccionar dónde guardar
+        filetypes = [("Archivo de Texto", "*.txt"), ("Documento de Word", "*.docx"), ("Archivo PDF", "*.pdf")]
+        filename = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=filetypes)
+        if filename:
+            try:
+                if filename.endswith('.txt'):
+                    with open(filename, 'w', encoding='utf-8') as f:
+                        f.write(self.transcribed_text)
+                elif filename.endswith('.docx'):
+                    doc = Document()
+                    doc.add_paragraph(self.transcribed_text)
+                    doc.save(filename)
+                elif filename.endswith('.pdf'):
+                    pdf = FPDF()
+                    pdf.add_page()
+                    pdf.set_font("Arial", size=12)
+                    # Manejar texto largo
+                    lines = self.transcribed_text.split('\n')
+                    for line in lines:
+                        pdf.multi_cell(0, 10, txt=line, align='L')
+                    pdf.output(filename)
+                messagebox.showinfo("Guardado", f"Transcripción guardada en {filename}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Ocurrió un error al guardar el archivo:\n{str(e)}")
+
+    def on_closing(self):
+        # Esta función se llama solo al cerrar la ventana
+        if self.is_listening:
+            self.is_listening = False
+            # No llamamos a join() aquí para evitar bloquear la GUI
+        self.root.after(100, self.safe_close)
+
+    def safe_close(self):
+        # Aseguramos que el hilo haya terminado
+        if self.transcribe_thread is not None and self.transcribe_thread.is_alive():
+            self.root.after(100, self.safe_close)
+        else:
+            # Finalizamos el stream y la interfaz de audio
+            if self.stream is not None:
+                self.stream.stop_stream()
+                self.stream.close()
+                self.stream = None
+            self.audio_interface.terminate()
+            self.root.destroy()
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = TranscriberApp(root)
+    root.protocol("WM_DELETE_WINDOW", app.on_closing)
+    root.mainloop()
+
+
